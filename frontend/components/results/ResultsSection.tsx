@@ -2,8 +2,9 @@
 
 import { useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
+import { MessageSquare, RefreshCw } from "lucide-react";
 import { Flight, FlightCard } from "./FlightCard";
-import { AiReportPanel } from "./AiRecommendationCard";
+import { AiReportPanel, ChatPanel } from "./AiRecommendationCard";
 import { AiSkeletonLoader } from "./SkeletonLoaders";
 
 interface ResultsSectionProps {
@@ -24,6 +25,7 @@ export function ResultsSection({
   onNewSearch,
 }: ResultsSectionProps) {
   const [activeTab, setActiveTab] = useState<"best" | "other">("best");
+  const [isChatOpen, setIsChatOpen] = useState(false);
 
   if (!hasSearched) return null;
 
@@ -37,7 +39,7 @@ export function ResultsSection({
         {isLoading ? (
           <AiSkeletonLoader />
         ) : aiReport ? (
-          <AiReportPanel report={aiReport} onNewSearch={onNewSearch} />
+          <AiReportPanel report={aiReport} />
         ) : null}
 
         {/* ── Flight tabs (only shown after report is ready) ── */}
@@ -111,6 +113,40 @@ export function ResultsSection({
               </motion.div>
             </AnimatePresence>
           </motion.div>
+        )}
+
+        {/* ── Action buttons + chat (only shown after report & flights are ready) ── */}
+        {!isLoading && aiReport && (
+          <>
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              transition={{ duration: 0.4, delay: 0.35 }}
+              className="flex gap-3"
+            >
+              <button
+                onClick={() => setIsChatOpen((v) => !v)}
+                className="flex-1 flex items-center justify-center gap-2 rounded-full border border-[var(--border)] bg-[var(--card)] px-5 py-3 text-sm font-semibold text-[var(--foreground)] hover:bg-[var(--accent)] hover:-translate-y-0.5 transition-all duration-200 shadow-sm"
+              >
+                <MessageSquare className="h-4 w-4" style={{ color: "var(--cyan)" }} />
+                Ask about this report
+              </button>
+              <button
+                onClick={onNewSearch}
+                className="flex-1 flex items-center justify-center gap-2 rounded-full px-5 py-3 text-sm font-semibold hover:opacity-90 hover:-translate-y-0.5 transition-all duration-200 shadow-sm"
+                style={{ backgroundColor: "var(--primary)", color: "var(--primary-foreground)" }}
+              >
+                <RefreshCw className="h-4 w-4" />
+                New search
+              </button>
+            </motion.div>
+
+            <AnimatePresence>
+              {isChatOpen && (
+                <ChatPanel reportText={aiReport} onClose={() => setIsChatOpen(false)} />
+              )}
+            </AnimatePresence>
+          </>
         )}
 
       </div>

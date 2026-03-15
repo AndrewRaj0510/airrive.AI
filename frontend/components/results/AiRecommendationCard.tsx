@@ -1,8 +1,8 @@
 "use client";
 
 import { useState, useRef, useEffect } from "react";
-import { motion, AnimatePresence } from "framer-motion";
-import { Sparkles, MessageSquare, RefreshCw, Send, X } from "lucide-react";
+import { motion } from "framer-motion";
+import { Sparkles, MessageSquare, Send, X } from "lucide-react";
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
 
@@ -10,7 +10,7 @@ type ChatMessage = { role: "user" | "assistant"; content: string };
 
 // ─── Chat panel ───────────────────────────────────────────────────────────────
 
-function ChatPanel({ reportText, onClose }: { reportText: string; onClose: () => void }) {
+export function ChatPanel({ reportText, onClose }: { reportText: string; onClose: () => void }) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
@@ -148,13 +148,9 @@ function ChatPanel({ reportText, onClose }: { reportText: string; onClose: () =>
 
 export function AiReportPanel({
   report,
-  onNewSearch,
 }: {
   report: string;
-  onNewSearch: () => void;
 }) {
-  const [isChatOpen, setIsChatOpen] = useState(false);
-
   // Parse report: split sections on blank lines, detect **Heading** lines
   const sections = report.split(/\n\n+/).filter((s) => s.trim().length > 0);
 
@@ -246,37 +242,6 @@ export function AiReportPanel({
           ))}
         </div>
       </div>
-
-      {/* Action buttons */}
-      <motion.div
-        initial={{ opacity: 0 }}
-        animate={{ opacity: 1 }}
-        transition={{ duration: 0.4, delay: 0.35 }}
-        className="flex gap-3"
-      >
-        <button
-          onClick={() => setIsChatOpen((v) => !v)}
-          className="flex-1 flex items-center justify-center gap-2 rounded-full border border-[var(--border)] bg-[var(--card)] px-5 py-3 text-sm font-semibold text-[var(--foreground)] hover:bg-[var(--accent)] hover:-translate-y-0.5 transition-all duration-200 shadow-sm"
-        >
-          <MessageSquare className="h-4 w-4" style={{ color: "var(--cyan)" }} />
-          Ask about this report
-        </button>
-        <button
-          onClick={onNewSearch}
-          className="flex-1 flex items-center justify-center gap-2 rounded-full px-5 py-3 text-sm font-semibold hover:opacity-90 hover:-translate-y-0.5 transition-all duration-200 shadow-sm"
-          style={{ backgroundColor: "var(--primary)", color: "var(--primary-foreground)" }}
-        >
-          <RefreshCw className="h-4 w-4" />
-          New search
-        </button>
-      </motion.div>
-
-      {/* Chat panel */}
-      <AnimatePresence>
-        {isChatOpen && (
-          <ChatPanel reportText={report} onClose={() => setIsChatOpen(false)} />
-        )}
-      </AnimatePresence>
     </motion.div>
   );
 }
