@@ -236,7 +236,7 @@ def _fetch_airport_context(cursor, iata: str) -> str:
     """Return a text block of DB stats for a given airport IATA code."""
     lines = [f"\n{_IATA_TO_CITY.get(iata, iata)} ({iata}) Airport Stats (last 7 days):"]
 
-    # Departures
+    # Departures — include all records; AVG/SUM ignore NULLs automatically
     cursor.execute("""
         SELECT COUNT(DISTINCT flight_iata),
                ROUND(AVG(departure_delay), 0),
@@ -245,19 +245,20 @@ def _fetch_airport_context(cursor, iata: str) -> str:
                STRING_AGG(DISTINCT airline_name, ', ' ORDER BY airline_name)
         FROM flight_history
         WHERE origin = %s
-          AND flight_date BETWEEN CURRENT_DATE - INTERVAL '8 days' AND CURRENT_DATE - INTERVAL '1 day'
-          AND departure_delay IS NOT NULL;
+          AND flight_date BETWEEN CURRENT_DATE - INTERVAL '8 days' AND CURRENT_DATE - INTERVAL '1 day';
     """, (iata,))
     row = cursor.fetchone()
     if row and row[3]:
-        late_pct = round(float(row[2]) / row[3] * 100) if row[3] > 0 else 0
-        avg_dep = float(row[1]) if row[1] else 0
+        late_count = int(row[2]) if row[2] is not None else 0
+        total = int(row[3])
+        late_pct = round(late_count / total * 100) if total > 0 else 0
+        avg_dep = float(row[1]) if row[1] is not None else 0
         dep_str = f"{abs(int(avg_dep))} mins early" if avg_dep < 0 else f"{int(avg_dep)} mins"
-        lines.append(f"  Departures: {row[0]} distinct flights, avg departure variance {dep_str}, {late_pct}% late")
+        lines.append(f"  Departures: {row[0]} distinct flights tracked, avg departure variance {dep_str}, {late_pct}% departed late")
         if row[4]:
             lines.append(f"  Airlines departing: {row[4]}")
 
-    # Arrivals
+    # Arrivals — include all records
     cursor.execute("""
         SELECT COUNT(DISTINCT flight_iata),
                ROUND(AVG(arrival_delay), 0),
@@ -265,15 +266,16 @@ def _fetch_airport_context(cursor, iata: str) -> str:
                COUNT(*)
         FROM flight_history
         WHERE destination = %s
-          AND flight_date BETWEEN CURRENT_DATE - INTERVAL '8 days' AND CURRENT_DATE - INTERVAL '1 day'
-          AND arrival_delay IS NOT NULL;
+          AND flight_date BETWEEN CURRENT_DATE - INTERVAL '8 days' AND CURRENT_DATE - INTERVAL '1 day';
     """, (iata,))
     row = cursor.fetchone()
     if row and row[3]:
-        late_pct = round(float(row[2]) / row[3] * 100) if row[3] > 0 else 0
-        avg_arr = float(row[1]) if row[1] else 0
+        late_count = int(row[2]) if row[2] is not None else 0
+        total = int(row[3])
+        late_pct = round(late_count / total * 100) if total > 0 else 0
+        avg_arr = float(row[1]) if row[1] is not None else 0
         arr_str = f"{abs(int(avg_arr))} mins early" if avg_arr < 0 else f"{int(avg_arr)} mins"
-        lines.append(f"  Arrivals: {row[0]} distinct flights, avg arrival variance {arr_str}, {late_pct}% late")
+        lines.append(f"  Arrivals: {row[0]} distinct flights tracked, avg arrival variance {arr_str}, {late_pct}% arrived late")
 
     return "\n".join(lines) if len(lines) > 1 else ""
 
@@ -378,14 +380,20 @@ def chat_with_context(report: dict, messages: list, search_id: int = None) -> st
                     conn.close()
 
     full_context = "\n".join(context_parts)
+    print(f"[CHAT] Context sections: {len(context_parts)}, total chars: {len(full_context)}")
 
     system_content = f"""You are Airrive AI, an expert flight assistant. You have access to the following live and historical flight data:
 
 {full_context}
 
-Answer any question the user asks — about this route, specific flights, airport performance, pricing, travel advice, or general aviation knowledge. Use the data above to give specific, accurate, data-backed answers whenever relevant. Maintain context from the full conversation history.
-Never use the phrase "arrival delay". If a flight arrived before its scheduled time, say "arrived early" or "X mins early".
-Never present any time value as a negative number. Early arrivals are always a positive number with the word "early"."""
+Answer any question the user asks — about this route, specific flights, airport performance, pricing, travel advice, or general aviation knowledge.
+- Use the data above to give specific, accurate, data-backed answers whenever relevant.
+- If Airport Stats are present, use them to answer questions about that airport's departures or arrivals.
+- If Airport Stats are NOT present but Per-Flight Historical Stats are, aggregate those to answer airport or route questions. For example, compute average departure variance from the per-flight stats to answer "what are the average delays departing from X".
+- Do NOT say information is unavailable if you have per-flight or airport-level data that can answer the question with aggregation.
+- Maintain context from the full conversation history.
+- Never use the phrase "arrival delay". If a flight arrived before its scheduled time, say "arrived early" or "X mins early".
+- Never present any time value as a negative number. Early arrivals are always expressed as a positive number with the word "early"."""
 
     response = client.chat.completions.create(
         model=GROQ_MODEL,
