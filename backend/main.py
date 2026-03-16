@@ -31,6 +31,7 @@ class AnalyzeRequest(BaseModel):
 class ChatRequest(BaseModel):
     report: dict
     messages: list
+    search_id: Optional[int] = None
 
 # --- Endpoints ---
 
@@ -86,9 +87,9 @@ def airport_reliability():
 
 @app.post("/api/chat")
 def chat(request: ChatRequest):
-    """Endpoint 3: Multi-turn chat grounded in a flight analysis report."""
+    """Endpoint 3: Multi-turn chat grounded in flight data and conversation history."""
     try:
-        reply = chat_with_context(report=request.report, messages=request.messages)
+        reply = chat_with_context(report=request.report, messages=request.messages, search_id=request.search_id)
         return {"reply": reply}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

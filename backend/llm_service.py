@@ -190,15 +190,202 @@ Historical Reliability Data (Last 7 Days):
             conn.close()
 
 
-def chat_with_context(report: dict, messages: list) -> str:
-    """Multi-turn chat grounded in the plain-text flight analysis report."""
-    system_content = f"""You are an expert flight analyst assistant. The user received this flight analysis report:
+import re as _re
 
-{json.dumps(report, indent=2)}
+_CITY_TO_IATA = {
+    "delhi": "DEL", "new delhi": "DEL", "mumbai": "BOM", "bombay": "BOM",
+    "bangalore": "BLR", "bengaluru": "BLR", "chennai": "MAA", "madras": "MAA",
+    "kolkata": "CCU", "calcutta": "CCU", "hyderabad": "HYD", "goa": "GOI",
+    "kochi": "COK", "cochin": "COK", "pune": "PNQ", "ahmedabad": "AMD",
+    "jaipur": "JAI", "lucknow": "LKO", "chandigarh": "IXC", "nagpur": "NAG",
+    "patna": "PAT", "bhubaneswar": "BBI", "visakhapatnam": "VTZ", "vizag": "VTZ",
+    "srinagar": "SXR", "amritsar": "ATQ", "vadodara": "BDQ", "baroda": "BDQ",
+    "indore": "IDR", "bhopal": "BHO", "coimbatore": "CJB", "trivandrum": "TRV",
+    "thiruvananthapuram": "TRV", "mangalore": "IXE", "mangaluru": "IXE",
+    "guwahati": "GAU", "varanasi": "VNS", "udaipur": "UDR", "jodhpur": "JDH",
+    "leh": "IXL", "raipur": "RPR", "ranchi": "IXR", "dehradun": "DED",
+    "jammu": "IXJ", "siliguri": "IXB", "bagdogra": "IXB",
+    "dubai": "DXB", "london": "LHR", "heathrow": "LHR", "singapore": "SIN",
+    "new york": "JFK", "nyc": "JFK", "paris": "CDG", "tokyo": "NRT",
+    "sydney": "SYD", "bangkok": "BKK", "kuala lumpur": "KUL", "hong kong": "HKG",
+    "toronto": "YYZ", "frankfurt": "FRA", "amsterdam": "AMS", "doha": "DOH",
+    "abu dhabi": "AUH", "kathmandu": "KTM", "colombo": "CMB", "male": "MLE",
+    "istanbul": "IST", "beijing": "PEK", "seoul": "ICN", "los angeles": "LAX",
+    "chicago": "ORD", "san francisco": "SFO", "miami": "MIA", "muscat": "MCT",
+    "riyadh": "RUH", "jeddah": "JED", "manila": "MNL", "jakarta": "CGK",
+}
 
-Answer their follow-up questions concisely and specifically based only on the data in this report. Do not invent flights or data not present in the report.
-Never use the phrase "arrival delay". If a flight arrived before its scheduled time, say "arrived early" or "arrived X mins early".
-Never present any time value as a negative number. Early arrivals are always expressed as a positive number with the word "early"."""
+_IATA_TO_CITY = {v: k.title() for k, v in _CITY_TO_IATA.items()}
+
+
+def _extract_iata_codes(text: str) -> list:
+    """Extract IATA codes from city names or 3-letter codes mentioned in text."""
+    found = set()
+    text_lower = text.lower()
+    # City names (longest match first to avoid partial hits)
+    for city in sorted(_CITY_TO_IATA, key=len, reverse=True):
+        if city in text_lower:
+            found.add(_CITY_TO_IATA[city])
+    # Bare 3-letter uppercase codes (e.g. DEL, BOM)
+    for code in _re.findall(r'\b[A-Z]{3}\b', text):
+        found.add(code)
+    return list(found)
+
+
+def _fetch_airport_context(cursor, iata: str) -> str:
+    """Return a text block of DB stats for a given airport IATA code."""
+    lines = [f"\n{_IATA_TO_CITY.get(iata, iata)} ({iata}) Airport Stats (last 7 days):"]
+
+    # Departures
+    cursor.execute("""
+        SELECT COUNT(DISTINCT flight_iata),
+               ROUND(AVG(departure_delay), 0),
+               SUM(CASE WHEN departure_delay > 5 THEN 1 ELSE 0 END),
+               COUNT(*),
+               STRING_AGG(DISTINCT airline_name, ', ' ORDER BY airline_name)
+        FROM flight_history
+        WHERE origin = %s
+          AND flight_date BETWEEN CURRENT_DATE - INTERVAL '8 days' AND CURRENT_DATE - INTERVAL '1 day'
+          AND departure_delay IS NOT NULL;
+    """, (iata,))
+    row = cursor.fetchone()
+    if row and row[3]:
+        late_pct = round(float(row[2]) / row[3] * 100) if row[3] > 0 else 0
+        avg_dep = float(row[1]) if row[1] else 0
+        dep_str = f"{abs(int(avg_dep))} mins early" if avg_dep < 0 else f"{int(avg_dep)} mins"
+        lines.append(f"  Departures: {row[0]} distinct flights, avg departure variance {dep_str}, {late_pct}% late")
+        if row[4]:
+            lines.append(f"  Airlines departing: {row[4]}")
+
+    # Arrivals
+    cursor.execute("""
+        SELECT COUNT(DISTINCT flight_iata),
+               ROUND(AVG(arrival_delay), 0),
+               SUM(CASE WHEN arrival_delay > 5 THEN 1 ELSE 0 END),
+               COUNT(*)
+        FROM flight_history
+        WHERE destination = %s
+          AND flight_date BETWEEN CURRENT_DATE - INTERVAL '8 days' AND CURRENT_DATE - INTERVAL '1 day'
+          AND arrival_delay IS NOT NULL;
+    """, (iata,))
+    row = cursor.fetchone()
+    if row and row[3]:
+        late_pct = round(float(row[2]) / row[3] * 100) if row[3] > 0 else 0
+        avg_arr = float(row[1]) if row[1] else 0
+        arr_str = f"{abs(int(avg_arr))} mins early" if avg_arr < 0 else f"{int(avg_arr)} mins"
+        lines.append(f"  Arrivals: {row[0]} distinct flights, avg arrival variance {arr_str}, {late_pct}% late")
+
+    return "\n".join(lines) if len(lines) > 1 else ""
+
+
+def chat_with_context(report: dict, messages: list, search_id: int = None) -> str:
+    """General-purpose flight assistant chat with full DB context."""
+    context_parts = [f"Flight Analysis Report:\n{json.dumps(report, indent=2)}"]
+
+    if search_id:
+        conn = None
+        try:
+            conn = psycopg2.connect(**DB_CONFIG)
+            cursor = conn.cursor()
+
+            # Live flights for this search
+            cursor.execute("""
+                SELECT flight_number, price, departure_time, arrival_time,
+                       airline_name, dep_iata, arrival_iata, category
+                FROM live_flight_searches WHERE search_id = %s;
+            """, (search_id,))
+            live_rows = cursor.fetchall()
+
+            if live_rows:
+                dep_iata = live_rows[0][5]
+                arr_iata = live_rows[0][6]
+                live_list = [
+                    {"flight": r[0], "price_inr": float(r[1]), "departure": str(r[2]),
+                     "arrival": str(r[3]), "airline": r[4], "category": r[7]}
+                    for r in live_rows
+                ]
+
+                # Per-flight historical stats for those live flights
+                live_iatas = [r[0].replace(" ", "").upper() for r in live_rows]
+                cursor.execute("""
+                    SELECT flight_iata,
+                           COUNT(*) as flights_tracked,
+                           ROUND(AVG(departure_delay), 0) as avg_dep_variance,
+                           ROUND(AVG(arrival_delay), 0) as avg_arr_variance,
+                           SUM(CASE WHEN status = 'Canceled' THEN 1 ELSE 0 END) as cancellations
+                    FROM flight_history
+                    WHERE flight_iata = ANY(%s)
+                      AND flight_date BETWEEN CURRENT_DATE - INTERVAL '8 days' AND CURRENT_DATE - INTERVAL '1 day'
+                    GROUP BY flight_iata;
+                """, (live_iatas,))
+                hist_rows = cursor.fetchall()
+                hist_list = [
+                    {"flight": r[0], "flights_tracked": r[1],
+                     "avg_departure_variance_mins": float(r[2]) if r[2] else 0,
+                     "avg_arrival_variance_mins": float(r[3]) if r[3] else 0,
+                     "cancellations": r[4]}
+                    for r in hist_rows
+                ]
+
+                context_parts.append(f"\nRoute: {dep_iata} → {arr_iata}")
+                context_parts.append(f"\nLive Flights Available:\n{json.dumps(live_list, indent=2)}")
+                context_parts.append(f"\nPer-Flight Historical Stats (Last 7 Days):\n{json.dumps(hist_list, indent=2)}")
+                # Always include origin + destination airport context
+                for iata in {dep_iata, arr_iata}:
+                    block = _fetch_airport_context(cursor, iata)
+                    if block:
+                        context_parts.append(block)
+
+            # Also fetch context for any airport/city mentioned in the latest user message
+            latest_user_msg = next(
+                (m["content"] for m in reversed(messages) if m.get("role") == "user"), ""
+            )
+            mentioned = _extract_iata_codes(latest_user_msg)
+            route_iatas = {live_rows[0][5], live_rows[0][6]} if live_rows else set()
+            for iata in mentioned:
+                if iata not in route_iatas:  # avoid duplicating route airports
+                    block = _fetch_airport_context(cursor, iata)
+                    if block:
+                        context_parts.append(block)
+
+        except Exception as e:
+            print(f"[WARN] chat_with_context DB fetch failed: {e}")
+        finally:
+            if conn:
+                cursor.close()
+                conn.close()
+
+    # Even without search_id, fetch context for airports mentioned in latest message
+    if not search_id:
+        latest_user_msg = next(
+            (m["content"] for m in reversed(messages) if m.get("role") == "user"), ""
+        )
+        mentioned = _extract_iata_codes(latest_user_msg)
+        if mentioned:
+            conn = None
+            try:
+                conn = psycopg2.connect(**DB_CONFIG)
+                cursor = conn.cursor()
+                for iata in mentioned:
+                    block = _fetch_airport_context(cursor, iata)
+                    if block:
+                        context_parts.append(block)
+            except Exception as e:
+                print(f"[WARN] chat_with_context airport lookup failed: {e}")
+            finally:
+                if conn:
+                    cursor.close()
+                    conn.close()
+
+    full_context = "\n".join(context_parts)
+
+    system_content = f"""You are Airrive AI, an expert flight assistant. You have access to the following live and historical flight data:
+
+{full_context}
+
+Answer any question the user asks — about this route, specific flights, airport performance, pricing, travel advice, or general aviation knowledge. Use the data above to give specific, accurate, data-backed answers whenever relevant. Maintain context from the full conversation history.
+Never use the phrase "arrival delay". If a flight arrived before its scheduled time, say "arrived early" or "X mins early".
+Never present any time value as a negative number. Early arrivals are always a positive number with the word "early"."""
 
     response = client.chat.completions.create(
         model=GROQ_MODEL,

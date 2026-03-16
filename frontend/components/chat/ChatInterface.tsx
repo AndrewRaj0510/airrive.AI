@@ -464,7 +464,7 @@ export function ChatInterface({ onSearch, onNewSearch, isSearching, hasSearched,
       fetch(`${API_BASE_URL}/api/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ report: { report: reportRef.current }, messages: newHistory }),
+        body: JSON.stringify({ report: { report: reportRef.current }, messages: newHistory, search_id: searchId }),
       })
         .then((r) => r.json())
         .then((data) => {
