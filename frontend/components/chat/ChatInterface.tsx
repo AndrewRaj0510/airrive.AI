@@ -306,6 +306,9 @@ export function ChatInterface({ onSearch, onNewSearch, isSearching, hasSearched,
   const [step, setStep] = useState<Step>("origin");
   const [origin, setOrigin] = useState<{ code: string; displayName: string } | null>(null);
   const [dest, setDest] = useState<{ code: string; displayName: string } | null>(null);
+  const [isChatLoading, setIsChatLoading] = useState(false);
+  const [chatHistory, setChatHistory] = useState<Array<{ role: string; content: string }>>([]);
+  const reportRef = useRef<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const nextId = useRef(2);
@@ -324,6 +327,8 @@ export function ChatInterface({ onSearch, onNewSearch, isSearching, hasSearched,
       setOrigin(null);
       setDest(null);
       setInput("");
+      setChatHistory([]);
+      reportRef.current = null;
     }
     prevHasSearched.current = hasSearched;
   }, [hasSearched]);
@@ -331,6 +336,8 @@ export function ChatInterface({ onSearch, onNewSearch, isSearching, hasSearched,
   // Post the AI report and switch to chat mode
   useEffect(() => {
     if (aiReport) {
+      reportRef.current = aiReport;
+      setChatHistory([]);
       const reportId = nextId.current++;
       setMessages((prev) => [...prev, { id: reportId, role: "bot", type: "text", text: aiReport }]);
       setStep("chat");
@@ -364,6 +371,7 @@ export function ChatInterface({ onSearch, onNewSearch, isSearching, hasSearched,
     setInput("");
 
     if (step === "chat") {
+      if (isChatLoading) return;
       const lower = val.toLowerCase();
 
       const wantsFlights =
@@ -374,7 +382,6 @@ export function ChatInterface({ onSearch, onNewSearch, isSearching, hasSearched,
 
       const wantsDelayReport =
         lower === "2" ||
-        lower.includes("delay") ||
         lower.includes("delay pattern");
 
       const wantsBestTime =
@@ -384,8 +391,7 @@ export function ChatInterface({ onSearch, onNewSearch, isSearching, hasSearched,
 
       const wantsAirportReport =
         lower === "4" ||
-        lower.includes("airport") ||
-        lower.includes("reliability");
+        lower.includes("airport reliability");
 
       if (wantsFlights && bestFlights.length > 0) {
         const labelId = nextId.current++;
@@ -397,9 +403,11 @@ export function ChatInterface({ onSearch, onNewSearch, isSearching, hasSearched,
             { id: flightsId, role: "bot", type: "flights", flights: bestFlights },
           ]);
         }, 400);
-      } else if (wantsDelayReport && searchId) {
-        const loadingId = nextId.current++;
-        setMessages((prev) => [...prev, { id: loadingId, role: "bot", type: "text", text: "Generating delay pattern report..." }]);
+        return;
+      }
+
+      if (wantsDelayReport && searchId) {
+        setMessages((prev) => [...prev, { id: nextId.current++, role: "bot", type: "text", text: "Generating delay pattern report..." }]);
         fetch(`${API_BASE_URL}/api/delay-report`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -413,9 +421,11 @@ export function ChatInterface({ onSearch, onNewSearch, isSearching, hasSearched,
           .catch(() => {
             setMessages((prev) => [...prev, { id: nextId.current++, role: "bot", type: "text", text: "Failed to fetch delay report. Please try again." }]);
           });
-      } else if (wantsBestTime && searchId) {
-        const loadingId = nextId.current++;
-        setMessages((prev) => [...prev, { id: loadingId, role: "bot", type: "text", text: "Generating best time to fly report..." }]);
+        return;
+      }
+
+      if (wantsBestTime && searchId) {
+        setMessages((prev) => [...prev, { id: nextId.current++, role: "bot", type: "text", text: "Generating best time to fly report..." }]);
         fetch(`${API_BASE_URL}/api/best-time-report`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -429,9 +439,11 @@ export function ChatInterface({ onSearch, onNewSearch, isSearching, hasSearched,
           .catch(() => {
             setMessages((prev) => [...prev, { id: nextId.current++, role: "bot", type: "text", text: "Failed to fetch best time report. Please try again." }]);
           });
-      } else if (wantsAirportReport) {
-        const loadingId = nextId.current++;
-        setMessages((prev) => [...prev, { id: loadingId, role: "bot", type: "text", text: "Generating airport reliability report..." }]);
+        return;
+      }
+
+      if (wantsAirportReport) {
+        setMessages((prev) => [...prev, { id: nextId.current++, role: "bot", type: "text", text: "Generating airport reliability report..." }]);
         fetch(`${API_BASE_URL}/api/airport-reliability`, { method: "POST" })
           .then((r) => r.json())
           .then((data) => {
@@ -441,9 +453,29 @@ export function ChatInterface({ onSearch, onNewSearch, isSearching, hasSearched,
           .catch(() => {
             setMessages((prev) => [...prev, { id: nextId.current++, role: "bot", type: "text", text: "Failed to fetch airport reliability report. Please try again." }]);
           });
-      } else {
-        addBotMessage("Try typing '1' for recommended flights, '2' for a delay report, '3' for best time to fly, or '4' for airport reliability.");
+        return;
       }
+
+      // Free-form fallback — send to /api/chat
+      const userMsg = { role: "user", content: val };
+      const newHistory = [...chatHistory, userMsg];
+      setChatHistory(newHistory);
+      setIsChatLoading(true);
+      fetch(`${API_BASE_URL}/api/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ report: { report: reportRef.current }, messages: newHistory }),
+      })
+        .then((r) => r.json())
+        .then((data) => {
+          const reply = data.reply || "Sorry, I couldn't generate a response.";
+          setChatHistory((prev) => [...prev, { role: "assistant", content: reply }]);
+          setMessages((prev) => [...prev, { id: nextId.current++, role: "bot", type: "text", text: reply }]);
+        })
+        .catch(() => {
+          setMessages((prev) => [...prev, { id: nextId.current++, role: "bot", type: "text", text: "Failed to get a response. Please try again." }]);
+        })
+        .finally(() => setIsChatLoading(false));
       return;
     }
 
@@ -493,7 +525,7 @@ export function ChatInterface({ onSearch, onNewSearch, isSearching, hasSearched,
     step === "origin" ? "Type a city (e.g. Delhi, Mumbai)..."
       : step === "destination" ? "Type destination city (e.g. Goa, London)..."
         : step === "date" ? "Type date (e.g. 25 Mar 2026)..."
-          : step === "chat" ? "Type 1 for recommended flights..."
+          : step === "chat" ? "Ask me anything about your flights..."
             : "Please wait...";
 
   return (
@@ -569,11 +601,12 @@ export function ChatInterface({ onSearch, onNewSearch, isSearching, hasSearched,
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 placeholder={placeholder}
-                className="flex-1 rounded-full border border-[var(--border)] bg-[var(--card)] px-5 py-3 text-sm text-[var(--foreground)] placeholder:text-[var(--muted-foreground)] outline-none focus:ring-2 focus:ring-[var(--foreground)] transition"
+                disabled={isChatLoading}
+                className="flex-1 rounded-full border border-[var(--border)] bg-[var(--card)] px-5 py-3 text-sm text-[var(--foreground)] placeholder:text-[var(--muted-foreground)] outline-none focus:ring-2 focus:ring-[var(--foreground)] disabled:opacity-50 transition"
               />
               <button
                 type="submit"
-                disabled={!input.trim()}
+                disabled={!input.trim() || isChatLoading}
                 className="flex h-11 w-11 items-center justify-center rounded-full bg-[var(--foreground)] text-[var(--background)] disabled:opacity-40 hover:opacity-80 transition active:scale-95 shrink-0"
               >
                 <Send className="h-4 w-4" />
@@ -581,7 +614,7 @@ export function ChatInterface({ onSearch, onNewSearch, isSearching, hasSearched,
             </form>
             <button
               onClick={onNewSearch}
-              className="w-full rounded-full border border-[var(--border)] bg-transparent px-5 py-2 text-xs font-semibold text-black dark:text-white hover:bg-[var(--accent)] transition"
+              className="w-full rounded-full border border-black bg-black text-white dark:border-[var(--border)] dark:bg-transparent dark:text-white hover:opacity-80 transition text-xs font-semibold px-5 py-2"
             >
               New Search
             </button>

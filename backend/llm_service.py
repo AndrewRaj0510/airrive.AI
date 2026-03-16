@@ -3,7 +3,7 @@ import json
 import psycopg2
 from groq import Groq
 from dotenv import load_dotenv
-from datetime import datetime
+from datetime import datetime, timedelta
 from collections import defaultdict
 
 load_dotenv()
@@ -33,7 +33,7 @@ def _fmt_delay_field(label: str, m: float) -> str:
 SYSTEM_PROMPT = """You are Airrive AI, a conversational flight assistant. Output the flight summary in EXACTLY this format. Every section heading must be on its own line wrapped in ** as shown. No other asterisks anywhere. No bullet points. No extra text before or after.
 
 **Flight Analysis: [ORIGIN] → [DESTINATION]**
-[Week Starting Date] – [Week Ending Date]
+[HISTORY_START] – [HISTORY_END]
 
 **Summary**
 Flights available: [count of live flights]
@@ -42,8 +42,8 @@ Airlines: [comma-separated unique airline names]
 Flights tracked historically: [total historically tracked]
 On-time: [on-time count] / [total historically tracked]
 Delayed: [delayed count] / [total historically tracked]
-Avg delay: [average arrival delay in minutes] mins
-Total delay impact: [sum of all delays in Xh Ym format]
+Avg punctuality: [average time difference in minutes] mins
+Total schedule impact: [sum of all time differences in Xh Ym format]
 
 **What Stood Out**
 [Specific observation — one sentence, name actual flight numbers and airlines]
@@ -64,10 +64,11 @@ Rules:
 - Section headings must be exactly as shown, wrapped in **, on their own line, nothing else on that line
 - Use only the flights fetched by the backend. No extra flights.
 - Always name actual airline names and flight numbers in observations
-- Extract the travel date from the departure times in the live flight data
-- A flight is on-time if avg_arrival_delay_mins <= 5; otherwise it is delayed
+- Use the exact HISTORY_START and HISTORY_END dates provided in the user prompt for the date line — do not use today's date or the live flight departure dates
+- A flight is on-time if avg_arrival_variance_mins <= 5; otherwise it is delayed
 - If historical data is empty, set on-time/delayed to N/A and base observations on live pricing and timing only
-- If a delay value is negative, write it as "X mins early" not "-X mins\""""
+- Never use the phrase "arrival delay". If a flight arrived before its scheduled time, say "arrived early" or "arrived X mins early"
+- Never present any time value as a negative number. Early arrivals are always expressed as positive minutes/hours with the word "early\""""
 
 
 def analyze_flights(search_id: int):
@@ -126,31 +127,38 @@ def analyze_flights(search_id: int):
             historical_data_for_llm.append({
                 "flight_iata": h[0],
                 "total_flights_tracked": h[1],
-                "avg_departure_delay_mins": float(h[2]) if h[2] is not None else 0,
-                "avg_arrival_delay_mins": float(h[3]) if h[3] is not None else 0,
+                "avg_departure_variance_mins": float(h[2]) if h[2] is not None else 0,
+                "avg_arrival_variance_mins": float(h[3]) if h[3] is not None else 0,
                 "times_canceled": h[4]
             })
 
+        # Historical window: CURRENT_DATE-8 to CURRENT_DATE-1 (matches SQL queries)
+        today = datetime.now().date()
+        history_start = (today - timedelta(days=8)).strftime("%-d %b %Y")
+        history_end = (today - timedelta(days=1)).strftime("%-d %b %Y")
+
         # Pre-compute summary stats so the LLM doesn't have to aggregate
         total_tracked = len(historical_data_for_llm)  # unique flight IATAs with history
-        on_time_count = sum(1 for h in historical_data_for_llm if h["avg_arrival_delay_mins"] <= 5)
+        on_time_count = sum(1 for h in historical_data_for_llm if h["avg_arrival_variance_mins"] <= 5)
         delayed_count = total_tracked - on_time_count
         avg_delay_all = (
-            sum(h["avg_arrival_delay_mins"] for h in historical_data_for_llm) / total_tracked
+            sum(h["avg_arrival_variance_mins"] for h in historical_data_for_llm) / total_tracked
             if total_tracked > 0 else 0
         )
-        total_delay_impact_mins = sum(h["avg_arrival_delay_mins"] for h in historical_data_for_llm)
+        total_delay_impact_mins = sum(h["avg_arrival_variance_mins"] for h in historical_data_for_llm)
         tdh, tdm = divmod(int(abs(total_delay_impact_mins)), 60)
         total_delay_str = f"{tdh}h {tdm}m early" if total_delay_impact_mins < 0 else f"{tdh}h {tdm}m"
 
         user_prompt = f"""Route: {dep_iata} → {arrival_iata}
+HISTORY_START: {history_start}
+HISTORY_END: {history_end}
 
 Pre-computed summary stats (use these exact numbers — do NOT recompute):
 - Flights tracked historically: {total_tracked}
-- On-time (avg arrival delay <= 5 min): {on_time_count}
-- Delayed (avg arrival delay > 5 min): {delayed_count}
-- Avg delay across tracked flights: {round(avg_delay_all)} mins
-- Total delay impact: {total_delay_str}
+- On-time (avg arrival variance <= 5 min): {on_time_count}
+- Delayed (avg arrival variance > 5 min): {delayed_count}
+- Avg variance across tracked flights: {round(avg_delay_all)} mins
+- Total schedule impact: {total_delay_str}
 
 Live Flights Available:
 {json.dumps(live_data_for_llm, indent=2)}
@@ -188,7 +196,9 @@ def chat_with_context(report: dict, messages: list) -> str:
 
 {json.dumps(report, indent=2)}
 
-Answer their follow-up questions concisely and specifically based only on the data in this report. Do not invent flights or data not present in the report."""
+Answer their follow-up questions concisely and specifically based only on the data in this report. Do not invent flights or data not present in the report.
+Never use the phrase "arrival delay". If a flight arrived before its scheduled time, say "arrived early" or "arrived X mins early".
+Never present any time value as a negative number. Early arrivals are always expressed as a positive number with the word "early"."""
 
     response = client.chat.completions.create(
         model=GROQ_MODEL,
@@ -353,7 +363,7 @@ def get_delay_report(search_id: int) -> dict:
             f"{_fmt_delay_field('Avg departure delay', orig_avg_dep)}\n"
             f"Delay rate: {orig_delayed_pct}%\n\n"
             f"**{dest} Airport (all arriving flights):**\n"
-            f"{_fmt_delay_field('Avg arrival delay', dest_avg_arr)}\n"
+            f"{_fmt_delay_field('Avg arrival time', dest_avg_arr)}\n"
             f"Delay rate: {dest_delayed_pct}%\n\n"
             f"**Pattern detected:**\n"
             f"{pattern_line}\n\n"
