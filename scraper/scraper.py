@@ -14,7 +14,8 @@ DB_CONFIG = {
     "user": os.getenv("DB_USER"),
     "password": os.getenv("DB_PASSWORD"),
     "host": os.getenv("DB_HOST"),
-    "port": os.getenv("DB_PORT")
+    "port": os.getenv("DB_PORT"),
+    "sslmode": "require"
 }
 
 def calculate_delay(scheduled, actual):
@@ -23,17 +24,17 @@ def calculate_delay(scheduled, actual):
     try:
         s_time = datetime.strptime(scheduled.strip(), "%I:%M %p")
         a_time = datetime.strptime(actual.strip(), "%I:%M %p")
-        
+
         s_mins = (s_time.hour * 60) + s_time.minute
         a_mins = (a_time.hour * 60) + a_time.minute
-        
+
         diff = a_mins - s_mins
-        
-        if diff < -1000:  
+
+        if diff < -1000:
             diff += 1440
         elif diff > 1000:
             diff -= 1440
-            
+
         return diff
     except ValueError:
         try:
@@ -59,21 +60,22 @@ def run_scraper():
     except Exception as e:
         print(f"[DB ERROR] Could not connect to database: {e}")
         return
-    
-    # NEW: Fetch only flights that haven't been scraped today
+
+    # Fetch only the next 50 flights that haven't been scraped today
     print("[DB] Fetching flights that need scraping...")
     cursor.execute("""
-        SELECT flight_iata FROM flights 
-        WHERE last_scraped_at IS NULL 
-           OR DATE(last_scraped_at) < CURRENT_DATE;
+        SELECT flight_iata FROM flights
+        WHERE last_scraped_at IS NULL
+           OR DATE(last_scraped_at) < CURRENT_DATE
+        LIMIT 50;
     """)
     flights_to_track = [row[0] for row in cursor.fetchall()]
-    
+
     if not flights_to_track:
         print("[DB SYSTEM] All flights are up to date! No scraping needed today. Exiting.")
         return
-        
-    print(f"[SYSTEM] Found {len(flights_to_track)} flight(s) to track today: {flights_to_track}")
+
+    print(f"[SYSTEM] Found {len(flights_to_track)} flight(s) to track: {flights_to_track}")
 
     print("[BROWSER] Launching Playwright...")
     with sync_playwright() as p:
@@ -91,10 +93,10 @@ def run_scraper():
             print(f"[SCRAPER] Target: {flight_iata}")
             url = f"https://www.flightradar24.com/data/flights/{flight_iata.lower()}"
             print(f"[SCRAPER] Navigating to URL: {url}")
-            
+
             try:
                 page.goto(url, wait_until="domcontentloaded")
-                
+
                 # Playwright automated cookie handling
                 print("[BROWSER] Checking for cookie banner...")
                 try:
@@ -109,8 +111,8 @@ def run_scraper():
                     print("[BROWSER] No cookie banner appeared.")
 
                 print("[PAUSE] ⏳ Waiting 10 seconds for table to render (handle captchas manually if needed)...")
-                page.wait_for_timeout(10000) 
-                
+                page.wait_for_timeout(10000)
+
                 table_selector = "table tbody tr"
                 try:
                     page.wait_for_selector(table_selector, timeout=10000)
@@ -121,38 +123,38 @@ def run_scraper():
 
                 rows = page.locator(table_selector).all()
                 print(f"[SCRAPER] Found {len(rows)} total rows in the table. Analyzing...")
-                
+
                 for index, row in enumerate(rows):
                     cells = row.locator("td").all_inner_texts()
-                    
+
                     if len(cells) < 11:
                         continue
-                        
+
                     date_str = row.get_attribute("data-date")
                     if not date_str:
-                        date_str = cells[2].strip() 
-                    
+                        date_str = cells[2].strip()
+
                     origin_raw = cells[3].strip()
                     destination_raw = cells[4].strip()
-                    
+
                     origin = re.search(r'\(([A-Z]{3})\)', origin_raw).group(1) if '(' in origin_raw else origin_raw[:3]
                     destination = re.search(r'\(([A-Z]{3})\)', destination_raw).group(1) if '(' in destination_raw else destination_raw[:3]
-                    
+
                     aircraft = cells[5].strip()
                     flight_time = cells[6].strip()
                     std = cells[7].strip()
                     atd = cells[8].strip()
                     sta = cells[9].strip()
                     raw_status = cells[11].strip()
-                    
+
                     std = "na" if not std or '—' in std else std
                     atd = "na" if not atd or '—' in atd else atd
                     sta = "na" if not sta or '—' in sta else sta
-                    
+
                     if "Landed" in raw_status:
                         status = "Landed"
                         ata = raw_status.replace("Landed", "").strip()
-                        ata = ata if ata else "na" 
+                        ata = ata if ata else "na"
                     elif "Canceled" in raw_status or "Cancelled" in raw_status:
                         status = "Canceled"
                         ata = "na"
@@ -163,19 +165,19 @@ def run_scraper():
                     arr_delay = calculate_delay(sta, ata)
 
                     insert_query = """
-                        INSERT INTO flight_history 
-                        (flight_iata, flight_date, origin, destination, aircraft, flight_time, 
+                        INSERT INTO flight_history
+                        (flight_iata, flight_date, origin, destination, aircraft, flight_time,
                          std, atd, sta, ata, status, departure_delay, arrival_delay)
                         VALUES (%s, %s::date, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                        ON CONFLICT (flight_iata, flight_date) 
-                        DO UPDATE SET 
+                        ON CONFLICT (flight_iata, flight_date)
+                        DO UPDATE SET
                             status = EXCLUDED.status,
                             atd = EXCLUDED.atd,
                             ata = EXCLUDED.ata,
                             departure_delay = EXCLUDED.departure_delay,
                             arrival_delay = EXCLUDED.arrival_delay;
                     """
-                    
+
                     try:
                         cursor.execute(insert_query, (
                             flight_iata, date_str, origin, destination, aircraft, flight_time,
@@ -185,22 +187,22 @@ def run_scraper():
                     except Exception as db_err:
                         print(f"  [DB ERROR] Failed to insert row for {date_str}: {db_err}")
                         conn.rollback()
-                        
-                # NEW: Update the timestamp in the flights table after successful scrape
+
+                # Update the timestamp in the flights table after successful scrape
                 print(f"[DB] Marking {flight_iata} as successfully scraped today.")
                 cursor.execute("""
-                    UPDATE flights 
-                    SET last_scraped_at = CURRENT_TIMESTAMP 
+                    UPDATE flights
+                    SET last_scraped_at = CURRENT_TIMESTAMP
                     WHERE flight_iata = %s;
                 """, (flight_iata,))
                 conn.commit()
 
             except Exception as e:
                 print(f"[FATAL ERROR] Failed to process flight {flight_iata}: {e}")
-                
+
         print("\n[BROWSER] Closing browser...")
         browser.close()
-    
+
     print("[DB] Closing connection...")
     cursor.close()
     conn.close()

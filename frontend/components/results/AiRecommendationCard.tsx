@@ -146,100 +146,64 @@ export function ChatPanel({ reportText, onClose }: { reportText: string; onClose
 
 // ─── Main export ──────────────────────────────────────────────────────────────
 
-export function AiReportPanel({
-  report,
-}: {
-  report: string;
-}) {
-  // Parse report: split sections on blank lines, detect **Heading** lines
-  const sections = report.split(/\n\n+/).filter((s) => s.trim().length > 0);
+// Render inline **bold** markers
+function renderInline(text: string, key: number) {
+  const parts = text.split(/(\*\*[^*]+\*\*)/g);
+  return (
+    <span key={key}>
+      {parts.map((part, i) =>
+        part.startsWith("**") && part.endsWith("**") ? (
+          <strong key={i} className="font-semibold text-[var(--foreground)]">
+            {part.slice(2, -2)}
+          </strong>
+        ) : (
+          part
+        )
+      )}
+    </span>
+  );
+}
 
-  const isHeading = (text: string) => /^\*\*[^*]+\*\*$/.test(text.trim());
-  const headingText = (text: string) => text.trim().replace(/^\*\*|\*\*$/g, "");
-
-  // Render inline text — handles **bold** within a line
-  const renderInline = (text: string, key: number) => {
-    const parts = text.split(/(\*\*[^*]+\*\*)/g);
-    return (
-      <span key={key}>
-        {parts.map((part, i) =>
-          part.startsWith("**") && part.endsWith("**") ? (
-            <strong key={i} className="font-semibold text-[var(--foreground)]">
-              {part.slice(2, -2)}
-            </strong>
-          ) : (
-            part
-          )
-        )}
-      </span>
-    );
-  };
-
-  // Render a section block (may contain multiple lines)
-  const renderLines = (block: string, blockIdx: number) =>
-    block
-      .split("\n")
-      .filter((l) => l.trim().length > 0)
-      .map((line, li) => (
-        <p key={li} className="text-[14px] leading-7 text-[var(--foreground)]">
-          {renderInline(line.trim(), blockIdx * 100 + li)}
-        </p>
-      ));
+export function AiReportPanel({ report }: { report: string }) {
+  const lines = report.split("\n");
 
   return (
     <motion.div
-      initial={{ opacity: 0, y: 16 }}
+      initial={{ opacity: 0, y: 12 }}
       animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.5 }}
-      className="space-y-5"
+      transition={{ duration: 0.4 }}
+      className="flex justify-start"
     >
-      {/* Report card */}
-      <div className="rounded-2xl border border-[var(--border)] bg-[var(--card)] overflow-hidden shadow-sm">
-
-        {/* Cyan top accent bar */}
-        <div className="h-1 w-full" style={{ backgroundColor: "var(--cyan)" }} />
-
-        {/* Header */}
-        <div className="flex items-center gap-3 px-7 pt-6 pb-2">
-          <Sparkles className="h-5 w-5 shrink-0" style={{ color: "var(--cyan)" }} />
-          <div>
-            <h2 className="text-lg font-bold text-[var(--foreground)] tracking-tight">
-              Flight Intelligence Report
-            </h2>
-            <p className="text-xs text-[var(--muted-foreground)] mt-0.5">
-              AI analysis · Historical reliability · Live pricing
-            </p>
-          </div>
+      <div className="rounded-2xl rounded-tl-sm bg-[var(--card)] border border-[var(--border)] px-5 py-4 shadow-sm max-w-full w-full">
+        {/* Tiny label */}
+        <div className="flex items-center gap-1.5 mb-3">
+          <Sparkles className="h-3.5 w-3.5 shrink-0" style={{ color: "var(--cyan)" }} />
+          <span className="text-[11px] font-bold uppercase tracking-widest text-[var(--muted-foreground)]">
+            Airrive AI
+          </span>
         </div>
 
-        {/* Divider */}
-        <div className="mx-7 mt-4 mb-6 h-px bg-[var(--border)]" />
+        {/* Report lines */}
+        <div className="space-y-1">
+          {lines.map((line, i) => {
+            const trimmed = line.trim();
+            if (!trimmed) return <div key={i} className="h-2" />;
 
-        {/* Report sections */}
-        <div className="px-7 pb-7 space-y-6">
-          {sections.map((section, i) => (
-            <motion.div
-              key={i}
-              initial={{ opacity: 0, y: 6 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ duration: 0.35, delay: i * 0.07 }}
-            >
-              {isHeading(section) ? (
-                /* Section heading */
-                <div className="flex items-center gap-2 mb-2">
-                  <div className="h-3.5 w-0.5 rounded-full shrink-0" style={{ backgroundColor: "var(--cyan)" }} />
-                  <h3 className="text-[13px] font-bold uppercase tracking-widest text-[var(--foreground)]">
-                    {headingText(section)}
-                  </h3>
-                </div>
-              ) : (
-                /* Body block */
-                <div className="space-y-1.5 pl-3">
-                  {renderLines(section, i)}
-                </div>
-              )}
-            </motion.div>
-          ))}
+            // Standalone **heading** line
+            if (/^\*\*[^*]+\*\*$/.test(trimmed)) {
+              return (
+                <p key={i} className="text-sm font-bold text-[var(--foreground)] mt-3 first:mt-0">
+                  {trimmed.slice(2, -2)}
+                </p>
+              );
+            }
+
+            return (
+              <p key={i} className="text-sm leading-6 text-[var(--foreground)]">
+                {renderInline(trimmed, i)}
+              </p>
+            );
+          })}
         </div>
       </div>
     </motion.div>

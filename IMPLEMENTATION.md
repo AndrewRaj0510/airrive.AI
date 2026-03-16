@@ -7,7 +7,7 @@
 
 An AI-powered flight intelligence platform that helps users decide which flight to book.
 It combines **live pricing** (via SerpApi) with **scraped historical reliability data**
-(via FlightRadar24) and feeds both into a **local LLM** (Ollama) to generate a structured
+(via FlightRadar24) and feeds both into **Groq AI** (cloud LLM) to generate a structured
 analyst report covering reliability, pricing, disruptions, and a final verdict.
 
 ---
@@ -16,11 +16,11 @@ analyst report covering reliability, pricing, disruptions, and a final verdict.
 
 | Layer | Technology |
 |---|---|
-| Frontend | React (Port 3000) |
-| Backend API | FastAPI (Python) |
-| Scraper | Playwright (headless) + playwright-stealth |
-| Database | PostgreSQL |
-| AI / LLM | Ollama — `gpt-oss:20b-cloud` (runs locally) |
+| Frontend | Next.js 14 — deployed on **Vercel** |
+| Backend API | FastAPI (Python) — deployed on **Render** |
+| Scraper | Playwright (headless) + playwright-stealth — run **manually** |
+| Database | **Supabase** (PostgreSQL, cloud-hosted) |
+| AI / LLM | **Groq API** — `llama-3.3-70b-versatile` |
 | Live Prices | SerpApi — Google Flights engine |
 | Historical Data | FlightRadar24 (web scraping) |
 
@@ -33,15 +33,17 @@ Flight_Booking_Decisions/
 ├── backend/
 │   ├── main.py               # FastAPI app, CORS, route definitions
 │   ├── fligtht_service.py    # Search logic: SerpApi fetch, DB cache, roster update
-│   └── llm_service.py        # Analyze logic: scraper orchestration, DB query, Ollama call
+│   └── llm_service.py        # Analyze logic: DB query, Groq AI call
 ├── scraper/
-│   └── scraper.py            # Playwright headless scraper for FlightRadar24
+│   └── scraper.py            # Playwright headless scraper for FlightRadar24 (manual)
 ├── database/
 │   ├── schema.sql            # flights + flight_history tables
 │   ├── api_schema.sql        # search_audit_logs + live_flight_searches tables
 │   ├── setup_db.py           # Runs schema.sql
 │   └── setup_api_db.py       # Runs api_schema.sql
-└── frontend/                 # React app
+├── frontend/                 # Next.js app
+├── docker-compose.yml        # Local Docker setup (backend + frontend)
+└── .env                      # Environment variables
 ```
 
 ---
@@ -130,7 +132,7 @@ Fetches live flights and caches them. Returns instantly if same route was search
 ---
 
 ### `POST /api/analyze`
-Runs the full pipeline: scrape → aggregate → AI report.
+Queries historical data and generates an AI report via Groq.
 
 **Request:**
 ```json
@@ -138,29 +140,18 @@ Runs the full pipeline: scrape → aggregate → AI report.
 ```
 
 **Logic:**
-1. Fetch flight IATAs from `live_flight_searches` for given `search_id`
-2. **Run scraper synchronously** (`subprocess.run` — blocks until complete)
-   - Scraper reads `flights` WHERE `last_scraped_at IS NULL OR DATE < TODAY`
-   - Navigates FlightRadar24 headlessly, parses table rows
-   - Upserts `Landed` / `Canceled` records into `flight_history`
-   - Updates `last_scraped_at` in `flights` per flight
-3. Query `flight_history` for 7-day aggregates: avg dep delay, avg arr delay, cancel count
-4. Build Ollama payload — static system prompt (cached KV) + dynamic user prompt (fresh data)
-5. POST to local Ollama API → parse JSON response
-6. Return `{ report, chart_data }`
+1. Fetch live flights from `live_flight_searches` for the given `search_id`
+2. Query `flight_history` for 7-day aggregates: avg dep delay, avg arr delay, cancel count
+3. Build Groq prompt — static system prompt + dynamic user prompt (live + historical data)
+4. Call Groq API → parse plain-text response
+5. Return `{ report }`
 
-**Report Structure (JSON):**
+**Report Structure (plain text, 4 sections):**
 ```
-report.reliability    → summary, text_table, best_time_to_fly
-report.pricing        → forecast, best_booking_day, best_booking_window, trend
-report.disruptions    → summary
-report.verdict        → top_picks[3], final_recommendation
-```
-
-**Chart Data:**
-```
-chart_data.delay_chart  → per-flight: avg_dep_delay, avg_arr_delay, cancellations
-chart_data.price_chart  → per-flight: price, airline, category
+**Reliability & Delay Trends**
+**Pricing Forecast & Booking Window**
+**Real-World Impact & Disruptions**
+**The Smart Booking Verdict**
 ```
 
 ---
@@ -173,7 +164,7 @@ Multi-turn chat grounded in an existing report.
 { "report": { ...report object... }, "messages": [ {"role": "user", "content": "..."} ] }
 ```
 
-**Logic:** Injects the full report as system context into Ollama `/api/chat`. The LLM answers only from data present in the report.
+**Logic:** Injects the full report as system context into Groq. The LLM answers only from data present in the report.
 
 **Response:** `{ "reply": "..." }`
 
@@ -181,6 +172,7 @@ Multi-turn chat grounded in an existing report.
 
 ## 6. Scraper — How It Works
 
+- **Trigger:** Run **manually** (`python scraper/scraper.py`) to populate `flight_history`
 - **Gate:** Only scrapes flights where `last_scraped_at IS NULL OR DATE(last_scraped_at) < CURRENT_DATE`
 - **Browser:** Playwright Chromium in **headless mode** with `playwright-stealth` to avoid bot detection
 - **Target URL:** `https://www.flightradar24.com/data/flights/{iata}` (lowercase)
@@ -192,50 +184,69 @@ Multi-turn chat grounded in an existing report.
 
 ---
 
-## 7. LLM Setup — Ollama
+## 7. LLM Setup — Groq
 
 | Setting | Value |
 |---|---|
-| Endpoint | `http://localhost:11434/api/generate` |
-| Model | `gpt-oss:20b-cloud` |
-| Format | `json` (enforced structured output) |
-| keep_alive | `15m` (model stays loaded in RAM between requests) |
-| System prompt | Static — enables Ollama KV cache (reduced latency on repeat calls) |
+| Provider | Groq API (cloud) |
+| Model | `llama-3.3-70b-versatile` |
+| Output format | Plain text (4 structured sections) |
+| System prompt | Static instruction block |
 | User prompt | Dynamic — injects live + historical data per request |
+| Free tier limits | 1,000 req/day, 6,000 tokens/min |
 
 ---
 
-## 8. Key Design Decisions
+## 8. Deployment
+
+| Service | Platform | Notes |
+|---|---|---|
+| Frontend | Vercel | Auto-deploys from `main` branch; Root Directory = `frontend` |
+| Backend | Render | Native Python runtime; Root Directory = `backend`; auto-deploys from `main` |
+| Database | Supabase | Hosted PostgreSQL; connect via pooler for IPv4 compatibility with Render free tier |
+
+**Keep Render awake:** Use [UptimeRobot](https://uptimerobot.com) to ping `https://airrive-ai.onrender.com/docs` every 5 minutes (free tier spins down after 15 min inactivity).
+
+---
+
+## 9. Key Design Decisions
 
 | Decision | Reason |
 |---|---|
-| Scraper runs synchronously inside `/api/analyze` | Guarantees fresh historical data before AI report is generated |
+| Groq instead of Ollama | Ollama requires local GPU/CPU and can't be cloud-deployed; Groq is free, fast, and cloud-based |
+| Scraper runs manually | Playwright can't run on Render free tier (no Chromium); historical data populated locally |
+| Supabase pooler (not direct connection) | Render free tier only supports IPv4; Supabase direct connection resolves to IPv6 |
 | SerpApi results cached per route+date | Avoids redundant paid API calls for same-day repeated searches |
 | `flight_history` uses upsert (ON CONFLICT DO UPDATE) | Scraper is idempotent — safe to re-run without duplicating data |
-| Static system prompt + dynamic user prompt | Ollama caches the large instruction block in KV; only small data payload changes per call |
-| Playwright in headless mode | No browser window popup; runs silently as part of the API request lifecycle |
+| CORS via `ALLOWED_ORIGINS` env var | Allows different origins per environment without code changes |
 | Delay stored as signed integer (minutes) | Negative values correctly represent early arrivals/departures |
 
 ---
 
-## 9. Environment Variables (`.env`)
+## 10. Environment Variables (`.env`)
 
 ```
-DB_NAME=
-DB_USER=
+DB_NAME=postgres
+DB_USER=postgres
 DB_PASSWORD=
-DB_HOST=
-DB_PORT=
+DB_HOST=db.ynclnhbogitklqvsektu.supabase.co   # direct (local use)
+DB_PORT=5432
 
 SERPAPI_KEY=
+GROQ_API_KEY=
+```
 
-OLLAMA_URL=http://localhost:11434/api/generate
-OLLAMA_MODEL=gpt-oss:20b-cloud
+**For Render (use Supabase pooler):**
+```
+DB_HOST=aws-1-ap-northeast-1.pooler.supabase.com
+DB_USER=postgres.ynclnhbogitklqvsektu
+DB_PORT=5432
+ALLOWED_ORIGINS=https://airrive-ai.vercel.app
 ```
 
 ---
 
-## 10. Eraser Architecture Diagram Code
+## 11. Eraser Architecture Diagram Code
 
 Paste into [eraser.io](https://eraser.io) → New Diagram → Cloud Architecture:
 
@@ -245,7 +256,7 @@ direction right
 User [icon: user, color: blue]
 
 Frontend [icon: monitor, color: blue] {
-  React [label: "React App\nPort 3000"]
+  NextJS [label: "Next.js 14\nVercel"]
 }
 
 Backend [icon: server, color: orange] {
@@ -255,7 +266,7 @@ Backend [icon: server, color: orange] {
 }
 
 Scraper [icon: globe, color: purple] {
-  ScraperBot [icon: python, label: "scraper.py\nPlaywright Headless"]
+  ScraperBot [icon: python, label: "scraper.py\nPlaywright Headless\n(manual run)"]
 }
 
 Database [icon: database, color: green] {
@@ -268,14 +279,15 @@ Database [icon: database, color: green] {
 External [icon: cloud, color: red] {
   SerpApi [icon: search, label: "SerpApi\nLive Prices (INR)"]
   FR24 [icon: plane, label: "FlightRadar24\nHistorical Data"]
-  Ollama [icon: cpu, label: "Ollama (local)\nAI Report Engine"]
+  Groq [icon: cpu, label: "Groq API\nllama-3.3-70b-versatile"]
+  Supabase [icon: database, label: "Supabase\nPostgreSQL (cloud)"]
 }
 
 // User to Frontend
-User > React: Search / Analyze / Chat
+User > NextJS: Search / Analyze / Chat
 
 // Frontend to API
-React > API: REST calls
+NextJS > API: REST calls
 
 // Search path
 API > SearchService
@@ -286,14 +298,20 @@ SearchService > flights: upsert flight IATAs
 
 // Analyze path
 API > AnalyzeService
-AnalyzeService > ScraperBot: subprocess.run() blocking
+AnalyzeService > flight_history: 7-day aggregates
+AnalyzeService > Groq: prompt + data
+Groq > API: plain-text report
+
+// Scraper (manual)
 ScraperBot > FR24: scrape flight history
 ScraperBot > flight_history: upsert daily records
 ScraperBot > flights: update last_scraped_at
-AnalyzeService > flight_history: 7-day aggregates
-AnalyzeService > Ollama: prompt + data
-Ollama > API: JSON report
+
+// Database (Supabase)
+SearchService > Supabase
+AnalyzeService > Supabase
+ScraperBot > Supabase
 
 // Chat path
-API > Ollama: multi-turn chat
+API > Groq: multi-turn chat
 ```

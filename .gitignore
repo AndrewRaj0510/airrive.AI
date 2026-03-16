@@ -25,3 +25,9 @@ node_modules/
 # OS
 .DS_Store
 Thumbs.db
+
+# Scraper variants
+scraper/scraper_null.py
+
+# Claude Code local config
+.claude/

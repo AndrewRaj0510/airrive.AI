@@ -4,7 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional
 from fligtht_service import process_flight_search
-from llm_service import analyze_flights, chat_with_context
+from llm_service import analyze_flights, chat_with_context, get_delay_report, get_best_time_report, get_airport_reliability_report
 
 app = FastAPI(title="Flight AI Insights API")
 
@@ -54,6 +54,33 @@ def generate_insights(request: AnalyzeRequest):
     try:
         insights = analyze_flights(search_id=request.search_id)
         return insights
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/delay-report")
+def delay_report(request: AnalyzeRequest):
+    """Endpoint 4: Computes a delay pattern report from historical data."""
+    try:
+        result = get_delay_report(search_id=request.search_id)
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/best-time-report")
+def best_time_report(request: AnalyzeRequest):
+    """Endpoint 5: Computes best time to fly from historical data."""
+    try:
+        result = get_best_time_report(search_id=request.search_id)
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/airport-reliability")
+def airport_reliability():
+    """Endpoint 6: Airport reliability report from last 24 hours."""
+    try:
+        result = get_airport_reliability_report()
+        return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
